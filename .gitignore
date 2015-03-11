@@ -4,7 +4,17 @@
 *.obj
 *.elf
 
-# Precompiled Headers
+# intermidiate files
+*.ko.cmd
+*.o.cmd
+*.symvers
+*.order
+*.mod.c
+.tmp_versions
+
+
+
+s Precompiled Headers
 *.gch
 *.pch
 
