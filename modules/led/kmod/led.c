@@ -109,7 +109,7 @@ static ssize_t led_proc_read(struct file *file,
 	int ret;
     int offset = *offset_ptr;
 
-	pr_info("reading led proc entry.\n");
+	pr_info("reading led proc entry (offset=%d; buflen=%d).\n", offset, buffer_length);
 	
 	/* 
 	 * We give all of our information in one go, so if the user
@@ -142,11 +142,11 @@ static ssize_t led_proc_read(struct file *file,
 		/* 
 		 * Make sure we are starting off with a clean buffer;
 		 */
-		strcpy(buffer, "LED driver");
+		strcpy(buffer, "LED driver\n");
 
 		ret = strlen(buffer);
 
-        *offset_ptr += strlen(buffer);
+        *offset_ptr += ret;
 	}
 
 	return ret;
@@ -167,24 +167,7 @@ led_dev_fops = {
 	.release        = led_close,
 };
 
-/* 
- * This is an instance of the miscdevice structure which is used in
- * the helloworld_init routine as a part of registering the module
- * when it is loaded.
- * 
- * The device type is "misc" which means that it will be assigned a
- * static major number of 10. We deduced this by doing ls -la /dev and
- * noticed several different entries we knew to be modules with major
- * number 10 but with different minor numbers.
- * 
- */
-static struct miscdevice
-led_misc = {
-	.minor = MISC_DYNAMIC_MINOR,
-	.name  = LED_MODULE_NAME,
-	.fops  = &led_dev_fops,
-};
-
+dev_t firstdev;
 
 /*
  * This routine is executed when the module is loaded into the
@@ -195,25 +178,18 @@ static int
 __init led_init(void)
 {
 	int ret = 0;
+ 
 
-	/*
-	 * Attempt to register the module as a misc. device with the
-	 * kernel.
-	 */
-	ret = misc_register(&led_misc);
+    alloc_chrdev_region(&firstdev, 0, 4, LED_MODULE_NAME);
 
-	if (ret < 0) {
-		/* Registration failed so give up. */
-		goto out;
-	}
 
 	/* 
 	 * Creating an entry in /proc with the module name as the file
 	 * name (/proc/helloworld). The S_IRUGO | S_IWUGO flags set
 	 * the permissions to 666 (rw,rw,rw).
 	 */
-	led_proc_entry = proc_create_data(LED_MODULE_NAME, 
-						  S_IRUGO | S_IWUGO, NULL, &proc_file_fops, NULL);
+	led_proc_entry = proc_create(LED_MODULE_NAME, 
+						  S_IRUGO | S_IWUGO, NULL, &proc_file_fops);
 
 	if (led_proc_entry == NULL) {
 		/*
@@ -237,11 +213,12 @@ out:
 static void
 __exit led_exit(void)
 { 
-    remove_proc_entry(LED_MODULE_NAME, led_proc_entry);
+    //remove_proc_entry(LED_MODULE_NAME, led_proc_entry);
+    remove_proc_entry(LED_MODULE_NAME, NULL);
 
-	misc_deregister(&led_misc);
+    unregister_chrdev_region(firstdev, 4);
 
-	printk("led module uninstalled\n");
+	pr_info("led module uninstalled\n");
 }
 
 module_init(led_init);
