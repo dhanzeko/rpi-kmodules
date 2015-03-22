@@ -8,14 +8,16 @@ mode="664"
 /sbin/insmod ./$module.ko $* || exit 1
 
 # remove stale nodes
-rm -f /dev/${device}[0-3]
+rm -f /dev/${device}[0-2]
 major=$(awk "\$2 == \"$module\" {print \$1}" /proc/devices)
 mknod /dev/${device}0 c $major 0
+mknod /dev/${device}0 c $major 1
+mknod /dev/${device}0 c $major 2
 
 # give appropriate group/permissions, and change the group.
 # Not all distributions have staff, some have "wheel" instead.
 #group="staff"
 #grep -q '^staff:' /etc/group || group="wheel"
 #chgrp $group /dev/${device}[0-3]
-chmod $mode /dev/${device}[0-3]
+chmod $mode /dev/${device}[0-2]
 

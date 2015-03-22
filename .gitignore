@@ -12,9 +12,10 @@
 *.mod.c
 .tmp_versions
 
+# Backup files
+*.*~
 
-
-s Precompiled Headers
+# Precompiled Headers
 *.gch
 *.pch
 

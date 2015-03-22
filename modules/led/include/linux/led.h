@@ -33,6 +33,9 @@ extern struct proc_dir_entry *led_proc_entry;
  * ===============================================
  */
 
+#define LED_COUNT 3
+
+
 /*
  * There typically needs to be a struct definition for each flavor of
  * IOCTL call.
@@ -50,7 +53,9 @@ typedef union led_ioctl_param_u {
 	led_ioctl_inc_t      set;
 } led_ioctl_param_union;
 
-#define LED_TOGGLE 1
+#define LED_ON     1
+#define LED_OFF    2
+#define LED_TOGGLE 3
 
 
 #endif /* LED_KM_H */
