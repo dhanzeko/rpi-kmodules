@@ -5,6 +5,7 @@
 #include <linux/kernel.h>   /* printk() */
 #include <linux/slab.h>     /* kmalloc() */
 #include <asm/uaccess.h>    /* copy_*_user */
+#include <linux/semaphore.h>
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -54,6 +55,8 @@ static struct gpio leds[] = {
 struct led_dev {
     int gpiopin;
     char brightness;
+    struct timer_list timer;
+    struct semaphore lock;
     struct cdev cdev;     /* Char device structure      */
 };
 
@@ -115,19 +118,28 @@ static ssize_t led_read(struct file *filp, char __user *buff,
     struct led_dev *dev = (struct led_dev *)filp->private_data;
     int len = 0;
     char kbuff[BUFFER_SIZE];  
+    int retval;
 
     if (*offp > 0)
         return 0;
 
+    if (down_interruptible(&dev->lock))
+        return -ERESTARTSYS;
+
+
     sprintf(kbuff, "%d\n", dev->brightness);
     len = strlen(kbuff);
     if (copy_to_user(buff, kbuff, len)) {
-        return -EFAULT;
+        retval = -EFAULT;
+        goto out;
     }
 
     *offp += len;
+    retval = len;
 
-    return count;
+out:
+    up(&dev->lock);
+    return retval;
 }
 
 static ssize_t led_write(struct file *filp, const char __user *buff, 
@@ -139,6 +151,9 @@ static ssize_t led_write(struct file *filp, const char __user *buff,
     int retval = 0;
     unsigned long brightness;
     int ret;
+
+    if (down_interruptible(&dev->lock))
+        return -ERESTARTSYS;
 
     len = count < (BUFFER_SIZE-1) ? count : BUFFER_SIZE-1;
 
@@ -159,6 +174,7 @@ static ssize_t led_write(struct file *filp, const char __user *buff,
 
 
 out:
+    up(&dev->lock);
     return retval;
 }  
 
@@ -270,6 +286,7 @@ static int led_setup_cdev(struct led_dev *dev, int index)
 {
     int err, devno = firstdev + index;
             
+    sema_init(&dev->lock, 1);
     dev->brightness = 0;
     dev->gpiopin = leds[index].gpio;
     cdev_init(&dev->cdev, &led_dev_fops);
