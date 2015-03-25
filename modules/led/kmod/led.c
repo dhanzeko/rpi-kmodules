@@ -27,6 +27,9 @@
 
 #define BUFFER_SIZE    64
 
+#define PWM_PERIOD  25      /* in milliseconds */
+#define PWM_RES     4       /* in bits */
+
 /*
  * Required Proc File-system Struct
  *
@@ -53,8 +56,10 @@ static struct gpio leds[] = {
 };
 
 struct led_dev {
-    int gpiopin;
-    char brightness;
+    unsigned int gpiopin;
+    unsigned int brightness;
+    unsigned int msec_on;
+    unsigned int msec_off;
     struct timer_list timer;
     struct semaphore lock;
     struct cdev cdev;     /* Char device structure      */
@@ -67,16 +72,59 @@ static dev_t firstdev;
 //module_param(gpiopins, unsigned int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 //MODULE_PARM_DESC(gpiopins, "A list of GPIO pins LEDs are attached to");
 
+static void led_timer_start(struct led_dev *dev, int interval)
+{
+    dev->timer.expires = jiffies + ((interval*HZ)/1000);
+    add_timer(&dev->timer);
+}
+
+static void led_timer_stop(struct led_dev *dev)
+{
+    del_timer(&dev->timer);
+}
+
+
+static void led_timer_toggle_led(unsigned long data)
+{
+    int pinval;
+    int delay;
+    struct led_dev *dev = (struct led_dev *)data;
+
+    pinval = gpio_get_value(dev->gpiopin);
+
+    delay = pinval ? dev->msec_off : dev->msec_on;
+
+    gpio_set_value(dev->gpiopin, !pinval);
+
+    led_timer_start(dev, delay);
+} 
+
+static void led_timer_init(struct led_dev *dev)
+{
+    init_timer(&dev->timer);
+    dev->timer.data = (unsigned long)dev;
+    dev->timer.function = led_timer_toggle_led;
+}
 
 static void led_brightness_set(struct led_dev *dev, int brightness)
 {
     dev->brightness = (char) (brightness <= 255 ? brightness : 255);
 
-    if (dev->brightness > 0) {
+    led_timer_stop(dev);
+
+    dev->msec_on = (PWM_PERIOD * brightness ) / 255;
+    dev->msec_off = PWM_PERIOD - dev->msec_on;
+    
+    if (dev->msec_off == 0) {
         gpio_set_value(dev->gpiopin, 1);
-    } else {
+    } else if (dev->msec_on == 0) {
         gpio_set_value(dev->gpiopin, 0);
+    } else {
+        led_timer_toggle_led((unsigned long)dev);
     }
+
+    pr_info("led_brightness_set: brightness %d, on %d, off %d\n",
+            dev->brightness, dev->msec_on, dev->msec_off);
 }
 
 
@@ -287,6 +335,7 @@ static int led_setup_cdev(struct led_dev *dev, int index)
     int err, devno = firstdev + index;
             
     sema_init(&dev->lock, 1);
+    led_timer_init(dev);
     dev->brightness = 0;
     dev->gpiopin = leds[index].gpio;
     cdev_init(&dev->cdev, &led_dev_fops);
@@ -385,8 +434,10 @@ static void __exit led_exit(void)
 
     remove_proc_entry(LED_MODULE_NAME, NULL);
 
-    for (i=0; i<LED_COUNT; i++)
+    for (i=0; i<LED_COUNT; i++) {
+        led_timer_stop(&led_devices[i]);
         cdev_del(&led_devices[i].cdev);
+    }
 
     unregister_chrdev_region(firstdev, LED_COUNT);
 
