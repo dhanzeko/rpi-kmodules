@@ -2,8 +2,9 @@
  * helloworld.c - Example kmod utilizing ioctl and procfs
  *
  */
-#include <linux/kernel.h>
-#include <asm/uaccess.h>
+#include <linux/kernel.h>   /* printk() */
+#include <linux/slab.h>     /* kmalloc() */
+#include <asm/uaccess.h>    /* copy_*_user */
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
@@ -11,24 +12,32 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/gpio.h>
+#include <linux/sched.h>
+#include <linux/cdev.h>
 
 #include "../include/linux/led.h"
 
-static ssize_t led_proc_read(struct file *file,
-                             char *buffer,
-                             size_t buffer_length, loff_t * offset_ptr);
 
-#define LED_ON_STR "on"
-#define LED_OFF_STR "off"
+#define MODULE_LICENSE_STR      "GPL"
+#define MODULE_DESCRIPTION_STR  "Simple LED module example with procfs and IOCTL"
+#define MODULE_AUTHOR_STR       "Darije Hanzekovic <darije.hanzekovic@gmail.com>"
+#define MODULE_VERSION_STR      "0.1"
+
+
+#define BUFFER_SIZE    64
 
 /*
  * Required Proc File-system Struct
  *
  * Used to map entry into proc file table upon module insertion
  */
+static ssize_t led_proc_read(struct file *file,
+        char *buffer,
+        size_t buffer_length, loff_t * offset_ptr);
+
 struct proc_dir_entry *led_proc_entry;
 
-const struct file_operations proc_file_fops = {
+static const struct file_operations proc_file_fops = {
     .owner = THIS_MODULE,
     .read = led_proc_read,
 };
@@ -42,8 +51,31 @@ static struct gpio leds[] = {
     { 4, GPIOF_OUT_INIT_LOW, "LED2" },
 };
 
+struct led_dev {
+    int gpiopin;
+    char brightness;
+    struct cdev cdev;     /* Char device structure      */
+};
+
+struct led_dev *led_devices;
+
+static dev_t firstdev;
+
 //module_param(gpiopins, unsigned int, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
 //MODULE_PARM_DESC(gpiopins, "A list of GPIO pins LEDs are attached to");
+
+
+static void led_brightness_set(struct led_dev *dev, int brightness)
+{
+    dev->brightness = (char) (brightness <= 255 ? brightness : 255);
+
+    if (dev->brightness > 0) {
+        gpio_set_value(dev->gpiopin, 1);
+    } else {
+        gpio_set_value(dev->gpiopin, 0);
+    }
+}
+
 
 /* 
  * ===============================================
@@ -61,29 +93,73 @@ static struct gpio leds[] = {
  * Generic open call that will always be successful since there is no
  * extra setup we need to do for this module as far
  */
-static int led_open(struct inode *inode, struct file *file)
+static int led_open(struct inode *inode, struct file *filp)
 {
+    struct led_dev *dev;
+
+    dev = container_of(inode->i_cdev, struct led_dev, cdev);
+    filp->private_data = dev;
+
     return 0;
 }
 
 
-static int led_close(struct inode *inode, struct file *file)
+static int led_close(struct inode *inode, struct file *filp)
 {
     return 0;
 }
 
-static ssize_t led_read(struct file *filep, char __user *buff, 
+static ssize_t led_read(struct file *filp, char __user *buff, 
         size_t count, loff_t *offp)
 {
-    pr_info("led_read()\n");
-    return 0;
+    struct led_dev *dev = (struct led_dev *)filp->private_data;
+    int len = 0;
+    char kbuff[BUFFER_SIZE];  
+
+    if (*offp > 0)
+        return 0;
+
+    sprintf(kbuff, "%d\n", dev->brightness);
+    len = strlen(kbuff);
+    if (copy_to_user(buff, kbuff, len)) {
+        return -EFAULT;
+    }
+
+    *offp += len;
+
+    return count;
 }
 
-static ssize_t led_write(struct file *filep, const char __user *buff, 
+static ssize_t led_write(struct file *filp, const char __user *buff, 
                 size_t count, loff_t *offp)
 {   
-    pr_info("led_write()\n");
-    return 0;
+    struct led_dev *dev = (struct led_dev *)filp->private_data;
+    int len = 0;
+    char kbuff[BUFFER_SIZE] = {0};
+    int retval = 0;
+    unsigned long brightness;
+    int ret;
+
+    len = count < (BUFFER_SIZE-1) ? count : BUFFER_SIZE-1;
+
+    if (copy_from_user(kbuff, buff, len)) {
+        retval = -EFAULT;
+        goto out;
+    } 
+
+    *offp += len;
+    retval = len;
+    kbuff[len] = '\0';
+
+    if ((ret = kstrtoul(kbuff, 0, &brightness)) == 0) {
+        led_brightness_set(dev, brightness);
+    } else {
+        pr_warn("led_write: invalid data, errno %d\n", ret);
+    }
+
+
+out:
+    return retval;
 }  
 
 
@@ -125,7 +201,7 @@ led_ioctl(struct file *file, unsigned int ioctl_num, unsigned long ioctl_param)
 
 
 /* 
- * ===============================================
+ * ==============================================gpio_request_array=
  *            Proc File Table Interface
  * ===============================================
  */
@@ -146,38 +222,21 @@ led_proc_read(struct file *file,
     pr_info("reading led proc entry (offset=%d; buflen=%d).\n", offset,
             buffer_length);
 
-    /* 
-     * We give all of our information in one go, so if the user
-     * asks us if we have more information the answer should
-     * always be no.
-     *
-     * This is important because the standard read function from
-     * the library would continue to issue the read system call
-     * until the kernel replies that it has no more information,
-     * or until its buffer is filled.
-     * 
-     */
     if (offset > 0) {
         /* we have finished to read, return 0 */
         ret = 0;
     } else {
-        /* fill the buffer, return the buffeint buffer_lengthr size This
-         * assumes that the buffer passed in is big enough to
-         * hold what we put in it. More defensive code would
-         * check the input buffer_length parameter to check
-         * the validity of that assumption.
-         *
-         * Note that the return value from this call (number
-         * of characters written to the buffer) from this will
-         * be added to the current offset at the file
-         * descriptor level managed by the system code that is
-         * called by this routine.
-         */
-
-        /* 
-         * Make sure we are stinclude/linux/string.harting off with a clean buffer;
-         */
-        strcpy(buffer, "LED driver\n");
+        sprintf(buffer, "%s: %s\n"
+                "revision: %s\n"
+                "author: %s\n"
+                "licence: %s\n"
+                "major: %d\n", 
+                LED_MODULE_NAME, 
+                MODULE_DESCRIPTION_STR,
+                MODULE_VERSION_STR, 
+                MODULE_AUTHOR_STR,
+                MODULE_LICENSE_STR,
+                MAJOR(firstdev));
 
         ret = strlen(buffer);
 
@@ -203,19 +262,58 @@ struct file_operations led_dev_fops = {
     .write = led_write,
 };
 
-dev_t firstdev;
 
 /*
- * This routine is executed when the module is loaded into the
+ *  * Set up the char_dev structure for this device.
+ *   */
+static int led_setup_cdev(struct led_dev *dev, int index)
+{
+    int err, devno = firstdev + index;
+            
+    dev->brightness = 0;
+    dev->gpiopin = leds[index].gpio;
+    cdev_init(&dev->cdev, &led_dev_fops);
+    dev->cdev.owner = THIS_MODULE;
+    dev->cdev.ops = &led_dev_fops;
+    err = cdev_add (&dev->cdev, devno, 1);
+    /* Fail gracefully if need be */
+    if (err)
+        pr_err("Error %d adding led%d", err, index);
+
+    return err;
+}
+
+
+/*
+ * This gpio_request_arrayroutine is executed when the module is loaded into the
  * kernel. I.E. during the insmod command.
  *
  */
 static int __init led_init(void)
 {
-    int ret = 0;
+    int i, j;
+    int res = 0;
 
-    alloc_chrdev_region(&firstdev, 0, LED_COUNT, LED_MODULE_NAME);
+    res = alloc_chrdev_region(&firstdev, 0, LED_COUNT, LED_MODULE_NAME);
+    if (res < 0) {
+        pr_warn("led: failed to alloc major\n");
+        goto init_major_alloc_fail;
+    }
 
+    led_devices = kmalloc(LED_COUNT * sizeof(struct led_dev), GFP_KERNEL);
+    if (led_devices == NULL) {
+        res = -ENOMEM;
+        goto init_dev_alloc_fail;
+    }
+
+    for (i=0; i<LED_COUNT; i++) {
+        if (led_setup_cdev(&led_devices[i], i) != 0) {
+            for (j=0; j<i; j++)
+                cdev_del(&led_devices[j].cdev);
+            res = -ENOMEM;
+            goto init_dev_add_fail;
+        }
+    }
 
     /* 
      * Creating an entry in /proc with the module name as the file
@@ -232,36 +330,57 @@ static int __init led_init(void)
          * approximate is separate issue but we chose to use
          * an existing error number.
         include/linux/string.h */
-        ret = -ENOMEM;
-        goto out;
+        res = -ENOMEM;
+        goto init_proc_create_fail;
     }
 
     // register gpios
-    ret = gpio_request_array(leds, ARRAY_SIZE(leds));
-    if (ret) {
-        pr_err("Unable to request GPIOs: %d\n", ret);
+    res = gpio_request_array(leds, ARRAY_SIZE(leds));
+    if (res) {
+        pr_err("Unable to request GPIOs: %d\n", res);
+        goto init_gpio_alloc_fail;
     }   
 
-    pr_info("led module installed\n");
+    pr_info("led module installed from proc=%s with pid=%d\n",
+            current->comm, current->pid);
 
-  out:
-    return ret;
+    return 0;
+
+
+init_gpio_alloc_fail:
+    remove_proc_entry(LED_MODULE_NAME, NULL);
+init_proc_create_fail:
+    for (i=0; i<LED_COUNT; i++)
+        cdev_del(&led_devices[i].cdev);
+init_dev_add_fail:
+    kfree(led_devices);
+init_dev_alloc_fail:
+    unregister_chrdev_region(firstdev, LED_COUNT);
+init_major_alloc_fail:
+    return res;
 }
 
 static void __exit led_exit(void)
 {
+    int i;
+
     gpio_free_array(leds, ARRAY_SIZE(leds));
 
     remove_proc_entry(LED_MODULE_NAME, NULL);
 
+    for (i=0; i<LED_COUNT; i++)
+        cdev_del(&led_devices[i].cdev);
+
     unregister_chrdev_region(firstdev, LED_COUNT);
 
-    pr_info("led module uninstalled\n");
+    pr_info("led module uninstalled from proc=%s with pid=%d\n",
+            current->comm, current->pid);
 }
 
 module_init(led_init);
 module_exit(led_exit);
 
-MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Simple LED module example with procfs and IOCTL");
-MODULE_AUTHOR("Darije Hanzekovic");
+MODULE_LICENSE(MODULE_LICENSE_STR);
+MODULE_DESCRIPTION(MODULE_DESCRIPTION_STR);
+MODULE_AUTHOR(MODULE_AUTHOR_STR);
+MODULE_VERSION(MODULE_VERSION_STR);
