@@ -123,8 +123,8 @@ static void led_brightness_set(struct led_dev *dev, int brightness)
         led_timer_toggle_led((unsigned long)dev);
     }
 
-    pr_info("led_brightness_set: brightness %d, on %d, off %d\n",
-            dev->brightness, dev->msec_on, dev->msec_off);
+    pr_info("led_brightness_set: HZ %d, brightness %d, on %d, off %d\n",
+            HZ, dev->brightness, dev->msec_on, dev->msec_off);
 }
 
 
